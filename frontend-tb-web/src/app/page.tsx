@@ -1,6 +1,7 @@
 "use client";
 
 import { RunningTasks } from "@/components/dashboard/running-tasks";
+import { AvailableTasks } from "@/components/dashboard/available-tasks";
 import { UploadDialog } from "@/components/dashboard/upload-dialog";
 import { useStore } from "@/lib/store";
 import Link from "next/link";
@@ -48,6 +49,7 @@ function Home() {
           <UserNav />
         </header>
         <main className="flex flex-1 flex-col gap-4 p-4 md:gap-8 md:p-6">
+          <AvailableTasks />
           <RunningTasks tasks={runningTasks} />
         </main>
       </div>

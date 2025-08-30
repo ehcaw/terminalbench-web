@@ -1,15 +1,14 @@
 "use client";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-
 import { withAuth } from "@/components/withAuth";
-
 import { UserNav } from "@/components/dashboard/user-nav";
-import TerminalComponent from "../../../components/terminal/terminal";
+import TerminalLog from "../../../components/terminal/terminal-log";
 import { useAuth } from "../../../contexts/AuthContext";
 
 function TaskDetailsPage({ params }: { params: { id: string } }) {
   const { user } = useAuth();
+  const userId = user?.uid || "";
   return (
     <div className="flex flex-col h-screen">
       <header className="flex h-14 lg:h-[60px] items-center gap-4 border-b bg-gray-100/40 px-6 dark:bg-gray-800/40">
@@ -32,7 +31,11 @@ function TaskDetailsPage({ params }: { params: { id: string } }) {
               {/*<div className="bg-gray-900 text-white font-mono text-sm p-4 rounded-lg">
                 <p>Run {i + 1} output...</p>
               </div>*/}
-              <TerminalComponent userId={user?.uid || ""} />
+              <TerminalLog
+                userId={userId}
+                taskId={params.id}
+                runIndex={i + 1}
+              />
             </TabsContent>
           ))}
         </Tabs>

@@ -2,8 +2,7 @@
 
 import { CompletedTasks } from "@/components/dashboard/completed-tasks";
 import { useStore } from "@/lib/store";
-
-import withAuth from "@/components/withAuth";
+import { withAuth } from "../../components/withAuth";
 
 import { UserNav } from "@/components/dashboard/user-nav";
 
