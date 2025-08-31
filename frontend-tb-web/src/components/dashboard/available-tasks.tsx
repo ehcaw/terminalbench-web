@@ -11,10 +11,11 @@ import {
 } from "@/components/ui/table";
 import { useEffect, useState } from "react";
 import { useAuth } from "../../contexts/AuthContext";
-
+import { useStore } from "@/lib/store";
 interface AvailableTask {
   id: string;
   name: string;
+  fullPath: string;
   description?: string;
   difficulty?: string;
   category?: string;
@@ -25,7 +26,14 @@ export function AvailableTasks() {
   const [tasks, setTasks] = useState<AvailableTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const { user } = useAuth();
+  const [startingTasks, setStartingTasks] = useState<Set<string>>(new Set());
+  const { user, getIdToken } = useAuth();
+  const addRunningTask = useStore((state) => state.addRunningTask);
+
+  const backendUrl =
+    process.env.NODE_ENV == "development"
+      ? "http://localhost:8000"
+      : "https://tb-web-backend.wache.dev";
 
   useEffect(() => {
     if (user?.uid) {
@@ -52,6 +60,7 @@ export function AvailableTasks() {
       }
       const data = await response.json();
       setTasks(data);
+      console.log(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
@@ -59,29 +68,90 @@ export function AvailableTasks() {
     }
   };
 
-  const handleStartTask = async (taskId: string) => {
+  const handleStartTask = async (storagePath: string, taskId: string) => {
+    console.log("=== TASK START DEBUG ===");
+    console.log("storagePath (task.fullPath):", storagePath);
+    console.log("taskId (task.id):", taskId);
+    console.log(
+      "Full task object:",
+      tasks.find((t) => t.id === taskId),
+    );
+
+    // Additional debugging for path issues
+    console.log("DEBUG: Request payload will be:", {
+      storage_path: storagePath,
+      task_name: taskId,
+    });
+    console.log(
+      "DEBUG: storagePath contains .zip.zip?",
+      storagePath.includes(".zip.zip"),
+    );
+    console.log("DEBUG: taskId contains .zip?", taskId.includes(".zip"));
+
     if (!user?.uid) {
       setError("User not authenticated");
       return;
     }
 
+    const token = await getIdToken();
+
+    console.log("DEBUG: Starting task with backend URL:", backendUrl);
+    console.log(
+      "DEBUG: Final request body:",
+      JSON.stringify({
+        storage_path: storagePath,
+        task_name: taskId,
+      }),
+    );
+
     try {
-      const response = await fetch("/api/tasks/start", {
+      const response = await fetch(`${backendUrl}/run-task-from-storage`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ taskId, userId: user.uid }),
+        body: JSON.stringify({
+          storage_path: storagePath,
+          task_name: taskId,
+        }),
       });
 
       if (!response.ok) {
-        throw new Error("Failed to start task");
+        const errorText = await response.text();
+        console.log("DEBUG: Error response:", errorText);
+        throw new Error(`Failed to start task: ${errorText}`);
       }
+      const result = await response.json();
+      console.log("DEBUG: Task started successfully:", result);
+
+      // Find the task details from the current tasks list
+      const taskDetails = tasks.find((task) => task.id === taskId);
+
+      const runningTask = {
+        id: result.task_id, // Use the backend-generated task ID
+        name: taskDetails?.name || taskId,
+        status: "running",
+        startedAt: new Date().toISOString(),
+        originalTaskId: taskId,
+        storagePath: storagePath,
+        streamUrl: result.stream_url,
+      };
+
+      addRunningTask(runningTask);
+      console.log("DEBUG: Added to running tasks:", runningTask);
 
       // Refresh the available tasks list
       fetchAvailableTasks();
+      window.location.href = `/task/${result.task_id}`;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start task");
+    } finally {
+      setStartingTasks((prev) => {
+        const newSet = new Set(prev);
+        newSet.delete(taskId);
+        return newSet;
+      });
     }
   };
 
@@ -155,7 +225,11 @@ export function AvailableTasks() {
                 </TableCell>
                 <TableCell>{task.category || "General"}</TableCell>
                 <TableCell>
-                  <Button size="sm" onClick={() => handleStartTask(task.id)}>
+                  <Button
+                    size="sm"
+                    disabled={startingTasks.has(task.id)}
+                    onClick={() => handleStartTask(task.fullPath, task.id)}
+                  >
                     Start Task
                   </Button>
                 </TableCell>

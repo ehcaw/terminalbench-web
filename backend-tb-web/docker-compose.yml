@@ -14,12 +14,18 @@ services:
       - FIREBASE_ADMIN_PRIVATE_KEY=${FIREBASE_ADMIN_PRIVATE_KEY}
       - FIREBASE_ADMIN_CLIENT_EMAIL=${FIREBASE_ADMIN_CLIENT_EMAIL}
       - FIREBASE_STORAGE_BUCKET=${FIREBASE_STORAGE_BUCKET}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - UPSTASH_REDIS_REST_URL=${UPSTASH_REDIS_REST_URL}
+      - UPSTASH_REDIS_REST_TOKEN=${UPSTASH_REDIS_REST_TOKEN}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 5m
       timeout: 5s
       retries: 3
       start_period: 15s
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    user: "root"
 
   terminal-bench-caddy:
     container_name: terminal-bench-caddy

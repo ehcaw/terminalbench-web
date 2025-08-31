@@ -7,22 +7,27 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useAuth } from "../../contexts/AuthContext";
 
 type Msg = {
+  type: "status" | "output" | "complete" | "error";
+  content: string;
   taskId: string;
   runId: string;
   seq: number;
-  stream: "stdout" | "stderr" | "status";
-  data: string;
+  timestamp: number;
+  isError?: boolean;
+  result?: any; // For complete messages
 };
+
 type Subscriber = (msg: Msg) => void;
 
 type Ctx = {
   subscribe: (key: string, fn: Subscriber) => () => void;
   startRun: (
-    taskId: string,
-    runIndex: number,
-  ) => Promise<{ runId: string } | null>;
+    storagePath: string,
+    taskName: string,
+  ) => Promise<{ taskId: string; runId: string; streamUrl: string } | null>;
   status: "connecting" | "open" | "error" | "closed";
   lastError: string | null;
 };
@@ -31,7 +36,9 @@ const LogsCtx = createContext<Ctx | null>(null);
 
 export function LogsProvider({
   userId,
-  apiBaseUrl = process.env.NEXT_PUBLIC_REACT_APP_API_URL || "",
+  apiBaseUrl = process.env.NODE_ENV == "development"
+    ? "http://localhost:8000"
+    : "https://tb-web-backend.wache.dev",
   children,
 }: {
   userId: string;
@@ -42,6 +49,8 @@ export function LogsProvider({
   const esRef = useRef<EventSource | null>(null);
   const [status, setStatus] = useState<Ctx["status"]>("connecting");
   const [lastError, setLastError] = useState<string | null>(null);
+
+  const { getIdToken } = useAuth();
 
   // Open ONE SSE per user
   useEffect(() => {
@@ -54,18 +63,30 @@ export function LogsProvider({
     );
     esRef.current = es;
 
-    es.onopen = () => setStatus("open");
+    es.onopen = () => {
+      setStatus("open");
+      setLastError(null); // Clear errors on successful connection
+    };
+
     es.onerror = () => {
       setStatus("error");
       setLastError("SSE connection error");
     };
+
+    // Listen for ping events (heartbeat)
+    es.addEventListener("ping", () => {
+      // Just a keepalive, no action needed
+    });
 
     es.addEventListener("task-output", (evt: MessageEvent) => {
       try {
         const msg = JSON.parse(evt.data) as Msg;
         const key = `${msg.taskId}:${msg.runId}`;
         const set = subsRef.current.get(key);
-        if (set) set.forEach((fn) => fn(msg));
+        if (set) {
+          // Pass the message directly - no need to transform
+          set.forEach((fn) => fn(msg));
+        }
       } catch (e) {
         console.error("Bad SSE payload", e, evt.data);
       }
@@ -91,35 +112,51 @@ export function LogsProvider({
   }, []);
 
   const startRun = useCallback(
-    async (taskId: string, runIndex: number) => {
+    async (storagePath: string, taskName: string) => {
       try {
+        // Get Firebase auth token
+        const token = await getIdToken();
+        if (!token) {
+          throw new Error("No authentication token available");
+        }
+
         const res = await fetch(
-          `${apiBaseUrl.replace(/\/+$/, "")}/tasks/start`,
+          `${apiBaseUrl.replace(/\/+$/, "")}/run-task-from-storage`,
           {
             method: "POST",
-            credentials: "include",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
             body: JSON.stringify({
-              user_id: userId,
-              task_id: taskId,
-              run_index: runIndex,
+              storage_path: storagePath,
+              task_name: taskName,
             }),
           },
         );
-        if (!res.ok)
+
+        if (!res.ok) {
+          const errorData = await res.json().catch(() => ({}));
           throw new Error(
-            (await res.json().catch(() => ({}) as any)).detail ||
-              "Failed to start run",
+            errorData.detail ||
+              errorData.message ||
+              `HTTP ${res.status}: Failed to start run`,
           );
+        }
+
         const data = await res.json();
-        return { runId: data.run_id as string };
+        return {
+          taskId: data.task_id,
+          runId: data.task_id, // Backend uses task_id as runId
+          streamUrl: data.stream_url,
+        };
       } catch (e: any) {
-        console.error(e);
+        console.error("Failed to start run:", e);
         setLastError(e.message);
         return null;
       }
     },
-    [apiBaseUrl, userId],
+    [apiBaseUrl, getIdToken],
   );
 
   return (

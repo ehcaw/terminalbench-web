@@ -1,91 +1,13 @@
-# task_manager.py
-# import asyncio, uuid, time
-# import docker
-# from collections import defaultdict
-
-# client = docker.from_env()
-# user_queues: dict[str, asyncio.Queue] = defaultdict(asyncio.Queue)  # used by your SSE endpoint
-
-# def start_task(image: str, cmd: list[str], user_id: str, task_id: str):
-#     run_id = uuid.uuid4().hex[:8]
-#     name = f"{user_id}_{task_id}_{run_id}"  # nice for 'docker ps', but don't rely on it
-#     cont = client.containers.run(
-#         image,
-#         cmd,
-#         name=name,
-#         detach=True,
-#         stdout=True,
-#         stderr=True,
-#         tty=False,
-#         stdin_open=False,
-#         labels={"app":"tb","user":user_id,"task":task_id,"run":run_id},
-#         environment={"PYTHONUNBUFFERED":"1"},
-#         # resources, volumes, network, etc. here as needed
-#     )
-#     return cont, run_id
-
-
-
-# async def stream_container(cont, user_id: str, task_id: str, run_id: str):
-#     """
-#     Push stdout/stderr lines from this task's container into the user's SSE queue.
-#     """
-#     # Use low-level API for better control if you prefer:
-#     # api = docker.APIClient(); logs = api.attach(cont.id, stream=True, logs=True, demux=True)
-#     loop = asyncio.get_running_loop()
-#     def _iter():
-#         # tail=0 avoids replay; follow=True keeps streaming
-#         return cont.logs(stream=True, follow=True, tail=0, stdout=True, stderr=True)
-#     it = await loop.run_in_executor(None, _iter)
-
-#     seq = 0
-#     buffer = b""
-#     try:
-#         for chunk in it:  # this iterator blocks; that's okay in the executor thread
-#             # chunk is bytes; may contain partial lines
-#             buffer += chunk
-#             while True:
-#                 nl = buffer.find(b"\n")
-#                 if nl == -1: break
-#                 line, buffer = buffer[:nl+1], buffer[nl+1:]
-#                 seq += 1
-#                 await user_queues[user_id].put({
-#                     "taskId": task_id,      # e.g., "task7"
-#                     "runId": run_id,        # for multi-run panes
-#                     "seq": seq,
-#                     "stream": "stdout",     # if you want separate streams, use demux=True and detect stderr
-#                     "data": line.decode("utf-8", "ignore"),
-#                 })
-#     finally:
-#         # flush any remainder
-#         if buffer:
-#             seq += 1
-#             await user_queues[user_id].put({
-#                 "taskId": task_id, "runId": run_id, "seq": seq, "stream": "stdout",
-#                 "data": buffer.decode("utf-8", "ignore")
-#             })
-#         # send a done marker
-#         await user_queues[user_id].put({
-#             "taskId": task_id, "runId": run_id, "seq": seq+1, "stream": "status", "data": "[done]\n"
-#         })
-
-# async def launch_10(image: str, base_cmd: list[str], user_id: str):
-#     tasks = []
-#     for i in range(10):
-#         task_id = f"task{i+1}"
-#         cmd = base_cmd[:]  # customize per task if needed
-#         cont, run_id = start_task(image, cmd, user_id, task_id)
-#         tasks.append(asyncio.create_task(stream_container(cont, user_id, task_id, run_id)))
-#     # don't await gather here if you want this to be fire-and-forget; otherwise:
-#     await asyncio.gather(*tasks)
 import docker
+from dotenv import load_dotenv
 import tempfile
 import os
 import asyncio
 import uuid
 from pathlib import Path
-from typing import Optional, Callable, AsyncGenerator
-import json
+from .redis import task_buffer
+
+load_dotenv()
 
 class TerminalBenchRunner:
     def __init__(self):
@@ -97,7 +19,7 @@ class TerminalBenchRunner:
         dockerfile_path = Path(__file__).parent / "Dockerfile"
         self.client.images.build(
             path=str(dockerfile_path.parent),
-            dockerfile=str(dockerfile_path),
+            dockerfile="Dockerfile",
             tag=self.image_name,
             rm=True
         )
@@ -112,21 +34,17 @@ class TerminalBenchRunner:
     ) -> dict:
         """
         Run a terminal-bench task with streaming output
-
-        Args:
-            zip_file_path: Path to the task zip file
-            task_name: Name of the task to run
-            user_id: User ID for the stream
-            task_id: Unique task ID
-            output_queue: Queue to send streaming output to
-
-        Returns:
-            dict: Final execution result
         """
+
+        print(f"DEBUG: ===== run_task_streaming CALLED =====")
+        print(f"DEBUG: zip_file_path: {zip_file_path}")
+        print(f"DEBUG: task_name: '{task_name}'")
+        print(f"DEBUG: user_id: {user_id}")
+        print(f"DEBUG: task_id: {task_id}")
         run_id = str(uuid.uuid4())
         seq = 0
 
-        def send_message(msg_type: str, content: str, is_error: bool = False):
+        def send_message(msg_type: str, content: str, is_error: bool = False, buffer: bool = True):
             nonlocal seq
             seq += 1
             message = {
@@ -138,86 +56,294 @@ class TerminalBenchRunner:
                 "timestamp": asyncio.get_event_loop().time(),
                 "isError": is_error
             }
+
+            # Only buffer important messages to reduce Redis writes
+            if buffer and should_buffer_message(msg_type, content):
+                try:
+                    task_buffer.append_output(task_id, run_id, message)
+                except Exception as e:
+                    print(f"DEBUG: Failed to store message in buffer: {e}")
+
+            # Always send to real-time queue for live streaming
             try:
                 output_queue.put_nowait(message)
             except asyncio.QueueFull:
-                pass  # Drop messages if queue is full
+                pass
 
-        # Create a temporary directory for mounting
-        with tempfile.TemporaryDirectory() as temp_dir:
-            try:
-                # Send initial status
-                send_message("status", f"Starting task: {task_name}")
+        def should_buffer_message(msg_type: str, content: str) -> bool:
+            """Determine if a message should be buffered (reduces 90% of writes)"""
+            # Always buffer these important message types
+            if msg_type in ["status", "error", "complete"]:
+                return True
 
-                # Copy zip file to temp directory
-                temp_zip_path = os.path.join(temp_dir, "task.zip")
-                with open(zip_file_path, 'rb') as src, open(temp_zip_path, 'wb') as dst:
-                    dst.write(src.read())
+            # For output messages, filter out build noise
+            if msg_type == "output":
+                # Skip common build/download noise
+                skip_patterns = [
+                    "Downloading", "Extracting", "Installing", "Building wheels",
+                    "Collecting", "Using cached", "Running setup.py",
+                    "Successfully installed", "Requirement already satisfied",
+                    "Step ", " ---> ", "Removing intermediate container",
+                    "Successfully built", "Archive:", "inflating:", "creating:",
+                    "GET https://", "200 OK", "Sending build context"
+                ]
 
-                send_message("status", "Task file prepared, starting container...")
+                # Don't buffer if it's noise
+                for pattern in skip_patterns:
+                    if pattern in content:
+                        return False
 
-                # Run container with streaming
-                container = self.client.containers.run(
-                    image=self.image_name,
-                    environment={
-                        "TASK_ZIP_PATH": "/app/task.zip",
-                        "TASK_NAME": task_name
-                    },
-                    volumes={
-                        temp_zip_path: {
-                            'bind': '/app/task.zip',
-                            'mode': 'ro'
-                        }
-                    },
-                    remove=False,  # Don't auto-remove so we can get logs
-                    detach=True,   # Run in background so we can stream
-                    stdout=True,
-                    stderr=True
-                )
+                # Buffer task execution output
+                return True
 
-                send_message("status", f"Container started: {container.id[:12]}")
+            return False
 
-                # Stream logs in real-time
-                log_stream = container.logs(stream=True, follow=True, stdout=True, stderr=True)
+        temp_dir = None
+        container = None
 
-                for log_line in log_stream:
-                    line = log_line.decode('utf-8').rstrip()
-                    if line:
-                        send_message("output", line)
+        try:
+            send_message("status", f"Starting task: {task_name}")
 
-                # Wait for container to finish
-                result = container.wait()
-                exit_code = result['StatusCode']
+            # Verify source file exists
+            if not os.path.exists(zip_file_path):
+                raise Exception(f"Source zip file does not exist: {zip_file_path}")
 
-                # Get final logs if any
-                final_logs = container.logs(stdout=True, stderr=True).decode('utf-8')
+            file_size = os.path.getsize(zip_file_path)
+            print(f"DEBUG: Source file size: {file_size} bytes")
 
-                # Clean up container
-                container.remove()
+            if file_size == 0:
+                raise Exception("Source zip file is empty")
 
-                if exit_code == 0:
-                    send_message("status", "Task completed successfully")
-                    return {
-                        "status": "success",
-                        "exit_code": exit_code,
-                        "task_name": task_name,
-                        "run_id": run_id
-                    }
-                else:
-                    send_message("status", f"Task failed with exit code {exit_code}", is_error=True)
-                    return {
-                        "status": "failed",
-                        "exit_code": exit_code,
-                        "task_name": task_name,
-                        "run_id": run_id,
-                        "error": f"Container exited with code {exit_code}"
-                    }
+            # Create a temporary directory for building a custom image
+            temp_dir = tempfile.mkdtemp(prefix="tb_build_")
 
-            except Exception as e:
-                send_message("status", f"Error: {str(e)}", is_error=True)
+            # Copy the original Dockerfile and script
+            dockerfile_source = Path(__file__).parent / "Dockerfile"
+            script_source = Path(__file__).parent / "run_task.sh"
+
+            # Copy files to temp directory
+            import shutil
+            shutil.copy2(dockerfile_source, os.path.join(temp_dir, "Dockerfile"))
+            shutil.copy2(script_source, os.path.join(temp_dir, "run_task.sh"))
+            shutil.copy2(zip_file_path, os.path.join(temp_dir, "task.zip"))
+
+            # Create a custom Dockerfile that includes the task file
+            custom_dockerfile = f"""FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl \
+    unzip \
+    git \
+    build-essential \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian \
+    $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker CLI (not the daemon)
+RUN apt-get update && apt-get install -y docker-ce-cli && rm -rf /var/lib/apt/lists/*
+
+# Install uv and terminal-bench
+RUN pip install uv
+RUN uv tool install terminal-bench
+
+# Add uv tools to PATH
+ENV PATH="/root/.local/bin:${{PATH}}"
+
+# Create necessary directories
+RUN mkdir -p /app/tasks
+WORKDIR /app
+
+# Copy the script and task file
+COPY run_task.sh /app/run_task.sh
+COPY task.zip /app/task.zip
+RUN chmod +x /app/run_task.sh
+
+# Set environment variables
+ENV TASK_ZIP_PATH=/app/task.zip
+ENV TASK_NAME={task_name}
+ENV ANTHROPIC_API_KEY={os.getenv('ANTHROPIC_API_KEY', '')}
+
+ENTRYPOINT ["/app/run_task.sh"]
+"""
+
+            # Write the custom Dockerfile
+            with open(os.path.join(temp_dir, "Dockerfile"), "w") as f:
+                f.write(custom_dockerfile)
+
+            send_message("status", "Building custom Docker image with task file...")
+
+            # Build custom image with the task file included
+            custom_image_name = f"tb-task-{task_id}-{run_id[:8]}"
+
+            print(f"DEBUG: Building image {custom_image_name} from {temp_dir}")
+
+            # Build the image
+            loop = asyncio.get_event_loop()
+
+            def build_image():
+                try:
+                    image, build_logs = self.client.images.build(
+                        path=temp_dir,
+                        tag=custom_image_name,
+                        rm=True,
+                        pull=False
+                    )
+                    return image, list(build_logs)
+                except Exception as e:
+                    print(f"DEBUG: Image build failed: {str(e)}")
+                    raise e
+
+            image, build_logs = await loop.run_in_executor(None, build_image)
+
+            send_message("status", f"Image built successfully: {custom_image_name}")
+
+            container_name = f"tb_{user_id}_{task_id}_{run_id[:8]}"
+
+            # Run the container with the built-in task file
+            container = self.client.containers.run(
+                image=custom_image_name,
+                name=container_name,
+                environment={
+                    "PYTHONUNBUFFERED": "1"
+                },
+                volumes = {
+                    # Mount Docker socket to allow Docker-in-Docker if needed
+                    "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"}
+                },
+                labels={
+                    "app": "terminal-bench",
+                    "user": user_id,
+                    "user_id": user_id,
+                    "task": task_id,
+                    "run": run_id
+                },
+                remove=False,
+                detach=True,
+                stdout=True,
+                stderr=True
+            )
+
+            send_message("status", f"Container started: {container.id[:12]}")
+
+            # Stream logs
+            loop = asyncio.get_event_loop()
+
+            def stream_and_wait():
+                try:
+                    execution_started = False
+                    output_buffer = []
+
+                    for log_line in container.logs(stream=True, follow=True, stdout=True, stderr=True):
+                        line = log_line.decode('utf-8').rstrip()
+                        if not line:
+                            continue
+
+                        # Detect when actual task execution starts
+                        if "=== RUNNING TASK ===" in line:
+                            execution_started = True
+                            # Send buffered important messages from build phase
+                            for buffered_msg in output_buffer:
+                                async def send_buffered():
+                                    send_message("output", buffered_msg, buffer=True)
+                                asyncio.run_coroutine_threadsafe(send_buffered(), loop)
+                            output_buffer.clear()
+
+                        # During build phase, buffer selectively
+                        if not execution_started:
+                            if should_buffer_message("output", line):
+                                output_buffer.append(line)
+                            # Still send to live stream but don't buffer noise
+                            async def send_build_message():
+                                send_message("output", line, buffer=False)
+                            asyncio.run_coroutine_threadsafe(send_build_message(), loop)
+                        else:
+                            # During execution, buffer everything important
+                            async def send_exec_message():
+                                send_message("output", line, buffer=True)
+                            asyncio.run_coroutine_threadsafe(send_exec_message(), loop)
+
+                    # Wait for container to finish
+                    result = container.wait()
+                    return result['StatusCode']
+                except Exception as e:
+                    print(f"DEBUG: Stream error: {str(e)}")
+                    return f"error: {str(e)}"
+
+            # Run in executor
+            exit_code = await loop.run_in_executor(None, stream_and_wait)
+
+            if isinstance(exit_code, str) and exit_code.startswith("error:"):
+                raise Exception(exit_code[7:])
+
+            if exit_code == 0:
+                send_message("status", "Task completed successfully")
+                task_buffer.mark_task_complete(task_id, run_id, "success")
                 return {
-                    "status": "error",
+                    "status": "success",
+                    "exit_code": exit_code,
+                    "task_name": task_name,
+                    "run_id": run_id
+                }
+            else:
+                send_message("status", f"Task failed with exit code {exit_code}", is_error=True)
+                task_buffer.force_flush(task_id, run_id)
+                return {
+                    "status": "failed",
+                    "exit_code": exit_code,
                     "task_name": task_name,
                     "run_id": run_id,
-                    "error": str(e)
+                    "error": f"Container exited with code {exit_code}"
                 }
+
+        except Exception as e:
+            send_message("status", f"Error: {str(e)}", is_error=True)
+            task_buffer.mark_task_complete(task_id, run_id, "error")
+            return {
+                "status": "error",
+                "task_name": task_name,
+                "run_id": run_id,
+                "error": str(e)
+            }
+        finally:
+            # Cleanup
+            if container:
+                try:
+                    # Clean up the container
+                    # container.remove(force=True)
+                    print(f"DEBUG: Container {container.id} removed")
+                except Exception as cleanup_error:
+                    print(f"DEBUG: Error removing container: {cleanup_error}")
+
+            # Clean up the custom image
+            try:
+                if 'custom_image_name' in locals():
+                    self.client.images.remove(custom_image_name, force=True)
+                    print(f"DEBUG: Image {custom_image_name} removed")
+            except Exception as cleanup_error:
+                print(f"DEBUG: Error removing image: {cleanup_error}")
+
+            # Clean up temp directory
+            if temp_dir:
+                try:
+                    import shutil
+                    shutil.rmtree(temp_dir)
+                    print(f"DEBUG: Temp directory {temp_dir} removed")
+                except Exception as cleanup_error:
+                    print(f"DEBUG: Error removing temp dir: {cleanup_error}")
+
+
+    def check_running_tasks_for_user(self, user_id:str):
+        """Check if there are running tasks for a given user"""
+        containers = self.client.containers.list(filters={"label": f"user={user_id}"})
+        return containers

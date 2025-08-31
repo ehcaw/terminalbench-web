@@ -1,0 +1,23 @@
+{
+  "services": [
+    {
+      "name": "auth",
+      "port": 8081
+    },
+    {
+      "name": "database",
+      "port": 8082
+    },
+    {
+      "name": "cache",
+      "port": 8083
+    }
+  ],
+  "health_service_port": 8080,
+  "dashboard_port": 8090,
+  "timeout_seconds": 5,
+  "auth": {
+    "username": "admin",
+    "password": "monitor123"
+  }
+}

@@ -1,0 +1,12 @@
+# Microservice Health Monitor Dependencies
+# Note: Basic setup - may need additional packages
+
+Flask==2.3.3
+requests==2.31.0
+
+# Optional: For better logging
+# colorlog==6.7.0
+
+# Development dependencies (commented out for production)
+# pytest==7.4.2
+# pytest-cov==4.1.0

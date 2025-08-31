@@ -69,7 +69,7 @@ export async function GET(request: NextRequest) {
         if (!fileName) continue;
 
         tasks.push({
-          id: fileName, // Use filename as ID
+          id: taskName, // Use task name without extension as ID
           name: taskName,
           fileName: fileName,
           fullPath: file.name,
@@ -90,7 +90,7 @@ export async function GET(request: NextRequest) {
 
         if (fileName) {
           tasks.push({
-            id: fileName,
+            id: taskName,
             name: taskName,
             fileName: fileName,
             fullPath: file.name,

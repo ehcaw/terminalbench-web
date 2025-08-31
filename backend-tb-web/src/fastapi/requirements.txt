@@ -6,3 +6,6 @@ PyJWT==2.8.0
 cryptography
 python-jose[cryptography]==3.3.0
 requests==2.31.0
+docker
+upstash-redis
+pydantic
