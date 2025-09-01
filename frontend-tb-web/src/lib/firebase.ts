@@ -19,7 +19,8 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 
 // Initialize Cloud Firestore and get a reference to the service
-export const db = getFirestore(app);
+// Connect to the terminal-bench-web-db-store database instead of default
+export const db = getFirestore(app, "terminal-bench-web-db-store");
 
 // Initialize Firebase Storage and get a reference to the service
 export const storage = getStorage(app);

@@ -15,6 +15,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "../../../components/ui/badge";
+import { JsonDocumentViewer } from "@/components/ui/json-document-viewer";
 import { Loader2, AlertCircle } from "lucide-react";
 
 // Dynamically import TerminalLog to avoid SSR issues with xterm
@@ -28,7 +29,7 @@ const TerminalLog = dynamic(
         <span className="ml-2 text-white">Loading terminal...</span>
       </div>
     ),
-  },
+  }
 );
 
 interface TaskInfo {
@@ -37,6 +38,9 @@ interface TaskInfo {
   status: string;
   description?: string;
   created_at?: string;
+  metadata?: any;
+  config?: any;
+  results?: any;
 }
 
 function TaskDetailsPage({ params }: { params: Promise<{ id: string }> }) {
@@ -136,7 +140,7 @@ function TaskDetailsPage({ params }: { params: Promise<{ id: string }> }) {
                   <div className="mt-1">
                     <Badge
                       variant={getStatusBadgeVariant(
-                        taskInfo?.status || "unknown",
+                        taskInfo?.status || "unknown"
                       )}
                     >
                       {taskInfo?.status || "Unknown"}
@@ -166,6 +170,66 @@ function TaskDetailsPage({ params }: { params: Promise<{ id: string }> }) {
               </div>
             </CardContent>
           </Card>
+
+          {/* Task Configuration */}
+          {taskInfo?.config && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Task Configuration</CardTitle>
+                <CardDescription>
+                  Configuration parameters and settings for this task
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <JsonDocumentViewer
+                  data={taskInfo.config}
+                  title="Task Configuration"
+                  defaultView="tree"
+                  maxHeight="400px"
+                />
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Task Metadata */}
+          {taskInfo?.metadata && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Task Metadata</CardTitle>
+                <CardDescription>
+                  Additional metadata and information about this task
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <JsonDocumentViewer
+                  data={taskInfo.metadata}
+                  title="Task Metadata"
+                  defaultView="tree"
+                  maxHeight="400px"
+                />
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Task Results */}
+          {taskInfo?.results && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Task Results</CardTitle>
+                <CardDescription>
+                  Output data and results from task execution
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <JsonDocumentViewer
+                  data={taskInfo.results}
+                  title="Task Results"
+                  defaultView="table"
+                  maxHeight="500px"
+                />
+              </CardContent>
+            </Card>
+          )}
 
           {/* Task Logs */}
           <Card>

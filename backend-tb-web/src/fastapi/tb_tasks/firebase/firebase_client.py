@@ -4,7 +4,7 @@ import json
 from typing import Optional, Dict, Any, BinaryIO
 from datetime import datetime, timedelta
 import firebase_admin
-from firebase_admin import credentials, storage
+from firebase_admin import credentials, storage, firestore
 from fastapi import UploadFile, HTTPException
 import logging
 
@@ -38,6 +38,7 @@ class FirebaseStorageClient:
 
         self._initialize_firebase(self.credentials_path)
         self._bucket = storage.bucket(self.bucket_name)
+        self._firestore_db = firestore.client()
         self._initialized = True
 
 
@@ -72,6 +73,7 @@ class FirebaseStorageClient:
                     )
                     logger.error(error_msg)
                     raise ValueError(error_msg)
+
     def _get_credentials_from_env(self) -> Optional[credentials.Certificate]:
         """
         Create Firebase credentials from environment variables.
@@ -311,6 +313,55 @@ class FirebaseStorageClient:
                 detail=f"Failed to download file: {str(e)}"
             )
 
+    def download_to_temp_file(self, storage_path: str, suffix: str = ".zip") -> str:
+        """
+        Download a file from Firebase Storage to a temporary file.
+
+        Args:
+            storage_path: Path in Firebase Storage
+            suffix: File suffix for temp file
+
+        Returns:
+            Path to temporary file (caller responsible for cleanup)
+        """
+        import tempfile
+
+        try:
+            # Ensure Firebase is initialized
+            self._ensure_initialized()
+
+            blob = self._bucket.blob(storage_path)
+
+            if not blob.exists():
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"File not found in storage: {storage_path}"
+                )
+
+            # Create temp file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            temp_file_path = temp_file.name
+            temp_file.close()  # Close file handle so we can write to it
+
+            # Download directly to temp file
+            blob.download_to_filename(temp_file_path)
+
+            logger.info(f"Downloaded {storage_path} to temporary file {temp_file_path}")
+            return temp_file_path
+
+        except Exception as e:
+            logger.error(f"Failed to download file to temp: {str(e)}")
+            # Clean up temp file if it was created
+            try:
+                if 'temp_file_path' in locals():
+                    os.unlink(temp_file_path)
+            except:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to download file to temp: {str(e)}"
+            )
+
     def delete_file(self, storage_path: str) -> bool:
         """
         Delete a file from Firebase Storage.
@@ -337,7 +388,7 @@ class FirebaseStorageClient:
 
         except Exception as e:
             logger.error(f"Failed to delete file: {str(e)}")
-            raise HTTPException(
+        raise HTTPException(
                 status_code=500,
                 detail=f"Failed to delete file: {str(e)}"
             )
@@ -487,6 +538,46 @@ class FirebaseStorageClient:
 
         return filename
 
+    async def upload_document_to_firestore(
+        self,
+        collection_name: str,
+        document_data: Dict[str, Any],
+        document_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Upload a dictionary as a document to a Firestore collection.
+
+        Args:
+            collection_name: The name of the Firestore collection.
+            document_data: The dictionary data to upload.
+            document_id: Optional ID for the document. If None, Firestore auto-generates one.
+
+        Returns:
+            A dict with the status and the ID of the document.
+        """
+        try:
+            self._ensure_initialized()
+
+            if document_id:
+                doc_ref = self._firestore_db.collection(collection_name).document(document_id)
+                doc_ref.set(document_data)
+                new_doc_id = document_id
+            else:
+                # Let Firestore generate the document ID
+                doc_ref = self._firestore_db.collection(collection_name).add(document_data)
+                new_doc_id = doc_ref[1].id
+
+            logger.info(f"Successfully uploaded document {new_doc_id} to collection {collection_name}")
+
+            return {
+                "success": True,
+                "collection": collection_name,
+                "document_id": new_doc_id
+            }
+        except Exception as e:
+            logger.error(f"Failed to upload document to Firestore: {str(e)}")
+            # We won't raise an HTTPException here to allow the calling function to handle it
+            raise RuntimeError(f"Failed to upload document to Firestore: {str(e)}")
 
 # Global client instance (optional)
 _storage_client: Optional[FirebaseStorageClient] = None

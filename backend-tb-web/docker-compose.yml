@@ -8,6 +8,9 @@ services:
       dockerfile: ./Dockerfile
     ports:
       - 8000:8000
+    volumes:
+      - ${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock
+      - task_files:/task_shared
     environment:
       - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
       - FIREBASE_ADMIN_PROJECT_ID=${FIREBASE_ADMIN_PROJECT_ID}
@@ -43,3 +46,4 @@ services:
 volumes:
   terminal-bench-caddy_data:
   terminal-bench-caddy_config:
+  task_files:

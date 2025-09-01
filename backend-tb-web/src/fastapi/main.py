@@ -1,8 +1,5 @@
-from typing import Union
-
 import os
 import zipfile
-import tempfile
 from collections import defaultdict
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +10,12 @@ from tb_runs.runner import TerminalBenchRunner
 from fastapi.responses import StreamingResponse
 from fastapi.requests import Request
 import asyncio
+from pydantic import BaseModel
+
+
+class TaskRequest(BaseModel):
+    task_name: str
+    storage_path: str
 
 app = FastAPI(title="Task Benchmark API", version="1.0.0")
 tb_runner = TerminalBenchRunner()
@@ -28,7 +31,12 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    tb_runner.build_image()
+    try:
+        tb_runner.build_image()
+        print("Docker image built successfully")
+    except Exception as e:
+        print(f"Warning: Could not build Docker image during startup: {e}")
+        print("Docker functionality may be limited until Docker is available")
 
 @app.get("/")
 def read_root():
@@ -38,6 +46,85 @@ def read_root():
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+
+@app.get("/test-task")
+async def test_task_execution():
+    """Test endpoint to trigger task execution without auth"""
+    import uuid
+    import tempfile
+    import os
+
+    # Create a simple test zip file
+    with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as temp_zip:
+        import zipfile
+        with zipfile.ZipFile(temp_zip.name, 'w') as zf:
+            zf.writestr('test-task/task.yaml', 'name: test-task\nversion: 1.0')
+            zf.writestr('test-task/run.sh', '#!/bin/bash\necho "Test task running"')
+
+        temp_file_path = temp_zip.name
+
+    task_id = str(uuid.uuid4())
+    user_id = "test-user"
+    task_name = "test-task"
+
+    # Get or create user queue
+    if user_id not in user_queues:
+        user_queues[user_id] = asyncio.Queue(maxsize=1000)
+
+    output_queue = user_queues[user_id]
+
+    # Start the task
+    async def run_test_task():
+        try:
+            result = await tb_runner.run_task_streaming(
+                temp_file_path,
+                task_name,
+                user_id,
+                task_id,
+                output_queue
+            )
+            print(f"Test task result: {result}")
+        except Exception as e:
+            print(f"Test task error: {e}")
+        finally:
+            try:
+                os.unlink(temp_file_path)
+            except:
+                pass
+
+    asyncio.create_task(run_test_task())
+
+    return {
+        "status": "test task started",
+        "task_id": task_id,
+        "message": "Check logs for debug output"
+    }
+
+
+@app.get("/health/docker")
+def docker_health_check():
+    """
+    Check if Docker is available and accessible.
+    """
+    try:
+        # Try to get Docker client info
+        client = tb_runner.client
+        info = client.info()
+        return {
+            "status": "healthy",
+            "docker_available": True,
+            "docker_version": info.get("ServerVersion", "unknown"),
+            "containers_running": info.get("ContainersRunning", 0)
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "docker_available": False,
+            "error": str(e),
+            "message": "Docker daemon is not accessible"
+        }
+
 
 
 @app.get("/debug/firebase")
@@ -263,15 +350,26 @@ async def stream(request: Request, user_id: str):
 
 @app.post("/run-task-from-storage")
 async def run_task_from_firebase_storage(
-    storage_path: str,
-    task_name: str,
+    request: TaskRequest,
     current_user: FirebaseUser = Depends(verify_firebase_token)
 ):
     """Run a task from a file already in Firebase Storage"""
-
     import uuid
+
+    print(f"User {current_user.email} (ID: {current_user.uid}) is requesting to run task from storage")
+    print(f"Request data: task_name={request.task_name}, storage_path={request.storage_path}")
+
     task_id = str(uuid.uuid4())
     user_id = current_user.uid
+    storage_path = request.storage_path
+    task_name = request.task_name
+
+    # Validate inputs
+    if not storage_path or not task_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Both storage_path and task_name are required"
+        )
 
     # Get or create user queue
     output_queue = user_queues[user_id]
@@ -279,22 +377,28 @@ async def run_task_from_firebase_storage(
     # Download file from Firebase Storage
     try:
         storage_client = get_storage_client()
-        def download_file():
-            blob = storage_client.bucket.blob(storage_path)
-            if not blob.exists():
-                raise FileNotFoundError(f"File not found: {storage_path}")
 
-            # Create temp file
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
-            blob.download_to_filename(temp_file.name)
-            return temp_file.name
+        # First check if file exists
+        try:
+            file_info = storage_client.get_file_info(storage_path)
+            print(f"File found in storage: {file_info}")
+        except Exception as info_error:
+            print(f"File not found or error getting info: {info_error}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"File not found in storage: {storage_path}"
+            )
 
-        # Run in thread pool to avoid blocking
-        loop = asyncio.get_event_loop()
-        temp_file_path = await loop.run_in_executor(None, download_file)
+        zip_file_content = storage_client.download_file(storage_path)
+        print(f"File content downloaded to memory ({len(zip_file_content)} bytes)")
+
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
+        print(f"Error downloading file: {str(e)}")
         raise HTTPException(
-            status_code=400,
+            status_code=500,
             detail=f"Failed to download file from storage: {str(e)}"
         )
 
@@ -302,7 +406,7 @@ async def run_task_from_firebase_storage(
     async def run_task_background():
         try:
             result = await tb_runner.run_task_streaming(
-                temp_file_path,
+                zip_file_content,
                 task_name,
                 user_id,
                 task_id,
@@ -321,6 +425,10 @@ async def run_task_from_firebase_storage(
             output_queue.put_nowait(completion_message)
 
         except Exception as e:
+            import traceback
+            print(f"\n\n--- ERROR IN BACKGROUND TASK RUNNER ---\n")
+            traceback.print_exc()
+            print(f"---------------------------------------\n\n")
             error_message = {
                 "type": "error",
                 "content": f"Task execution failed: {str(e)}",
@@ -334,7 +442,7 @@ async def run_task_from_firebase_storage(
             output_queue.put_nowait(error_message)
         finally:
             try:
-                os.unlink(temp_file_path)
+                print("Cleaning up downloaded file from memory")
             except:
                 pass
 
@@ -346,4 +454,139 @@ async def run_task_from_firebase_storage(
         "user_id": user_id,
         "stream_url": f"/stream?user_id={user_id}",
         "message": "Task started. Connect to stream endpoint to receive output."
+    }
+
+@app.post("/tasks/start")
+async def start_task_simple(
+    request: dict,
+    current_user: FirebaseUser = Depends(verify_firebase_token)
+):
+    """Simple endpoint to start a task - for testing the new logs provider"""
+    import uuid
+
+    task_id = request.get("task_id", str(uuid.uuid4()))
+    run_index = request.get("run_index", 1)
+    user_id = current_user.uid
+
+    print(f"Starting task {task_id} for user {user_id}")
+
+    # Get or create user queue
+    output_queue = user_queues[user_id]
+
+    # Create a run ID
+    run_id = str(uuid.uuid4())
+
+    # Send some test messages to the queue
+    async def send_test_messages():
+        import asyncio
+        seq = 0
+
+        def send_message(stream_type: str, content: str):
+            nonlocal seq
+            seq += 1
+            message = {
+                "taskId": task_id,
+                "runId": run_id,
+                "seq": seq,
+                "stream": stream_type,
+                "data": content + "\n"
+            }
+            try:
+                output_queue.put_nowait(message)
+            except asyncio.QueueFull:
+                pass
+
+        # Send initial messages
+        send_message("status", "Starting task...")
+        await asyncio.sleep(1)
+
+        send_message("stdout", "Task is running...")
+        await asyncio.sleep(1)
+
+        send_message("stdout", "Processing files...")
+        await asyncio.sleep(1)
+
+        send_message("stdout", "Running tests...")
+        await asyncio.sleep(2)
+
+        send_message("stdout", "All tests passed!")
+        await asyncio.sleep(1)
+
+        send_message("status", "[done] Task completed successfully")
+
+    # Start background task
+    asyncio.create_task(send_test_messages())
+
+    return {
+        "run_id": run_id,
+        "status": "started",
+        "task_id": task_id,
+        "user_id": user_id
+    }
+
+@app.post("/debug/start-task")
+async def debug_start_task(request: dict):
+    """Debug endpoint to test task streaming without authentication"""
+    import uuid
+
+    task_id = request.get("task_id", "test-task")
+    user_id = request.get("user_id", "debug-user")
+
+    print(f"DEBUG: Starting task {task_id} for user {user_id}")
+
+    # Get or create user queue
+    output_queue = user_queues[user_id]
+
+    # Create a run ID
+    run_id = str(uuid.uuid4())
+
+    # Send some test messages to the queue
+    async def send_test_messages():
+        import asyncio
+        seq = 0
+
+        def send_message(stream_type: str, content: str):
+            nonlocal seq
+            seq += 1
+            message = {
+                "taskId": task_id,
+                "runId": run_id,
+                "seq": seq,
+                "stream": stream_type,
+                "data": content + "\r\n"
+            }
+            try:
+                output_queue.put_nowait(message)
+                print(f"DEBUG: Sent message {seq}: {content[:50]}...")
+            except Exception as e:
+                print(f"DEBUG: Failed to send message: {e}")
+
+        # Send initial messages
+        send_message("status", "Starting task...")
+        await asyncio.sleep(1)
+
+        send_message("stdout", "Task is running...")
+        await asyncio.sleep(1)
+
+        send_message("stdout", "Processing files...")
+        await asyncio.sleep(1)
+
+        send_message("stdout", "Running tests...")
+        await asyncio.sleep(2)
+
+        send_message("stdout", "All tests passed!")
+        await asyncio.sleep(1)
+
+        send_message("status", "[done] Task completed successfully")
+
+    # Start background task
+    asyncio.create_task(send_test_messages())
+
+    return {
+        "run_id": run_id,
+        "status": "started",
+        "task_id": task_id,
+        "user_id": user_id,
+        "stream_url": f"/stream?user_id={user_id}",
+        "message": "Debug task started. Connect to stream endpoint to receive output."
     }
