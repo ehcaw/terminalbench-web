@@ -1,11 +1,18 @@
-import { auth } from './firebase';
+import { auth } from "./firebase";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+const API_BASE_URL =
+  process.env.NODE_ENV == "development"
+    ? "http://localhost:8000"
+    : "https://tb-web-backend.wache.dev";
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string, public data?: any) {
+  constructor(
+    public status: number,
+    message: string,
+    public data?: any,
+  ) {
     super(message);
-    this.name = 'ApiError';
+    this.name = "ApiError";
   }
 }
 
@@ -16,14 +23,14 @@ async function getAuthToken(): Promise<string | null> {
   try {
     return await user.getIdToken();
   } catch (error) {
-    console.error('Error getting auth token:', error);
+    console.error("Error getting auth token:", error);
     return null;
   }
 }
 
 async function makeAuthenticatedRequest(
   endpoint: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
 ): Promise<Response> {
   const token = await getAuthToken();
 
@@ -32,7 +39,7 @@ async function makeAuthenticatedRequest(
   };
 
   if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+    headers["Authorization"] = `Bearer ${token}`;
   }
 
   const response = await fetch(`${API_BASE_URL}${endpoint}`, {
@@ -50,8 +57,8 @@ async function makeAuthenticatedRequest(
 
     throw new ApiError(
       response.status,
-      errorData.detail || errorData.message || 'An error occurred',
-      errorData
+      errorData.detail || errorData.message || "An error occurred",
+      errorData,
     );
   }
 
@@ -60,10 +67,10 @@ async function makeAuthenticatedRequest(
 
 export async function uploadTaskZip(file: File): Promise<any> {
   const formData = new FormData();
-  formData.append('file', file);
+  formData.append("file", file);
 
-  const response = await makeAuthenticatedRequest('/upload-task', {
-    method: 'POST',
+  const response = await makeAuthenticatedRequest("/upload-task", {
+    method: "POST",
     body: formData,
   });
 
@@ -78,7 +85,7 @@ export async function getApiHealth(): Promise<any> {
 // Generic authenticated GET request
 export async function apiGet(endpoint: string): Promise<any> {
   const response = await makeAuthenticatedRequest(endpoint, {
-    method: 'GET',
+    method: "GET",
   });
   return response.json();
 }
@@ -91,12 +98,12 @@ export async function apiPost(endpoint: string, data?: any): Promise<any> {
   if (data instanceof FormData) {
     body = data;
   } else if (data) {
-    headers['Content-Type'] = 'application/json';
+    headers["Content-Type"] = "application/json";
     body = JSON.stringify(data);
   }
 
   const response = await makeAuthenticatedRequest(endpoint, {
-    method: 'POST',
+    method: "POST",
     headers,
     body,
   });
@@ -107,8 +114,8 @@ export async function apiPost(endpoint: string, data?: any): Promise<any> {
 // Generic authenticated PUT request
 export async function apiPut(endpoint: string, data?: any): Promise<any> {
   const response = await makeAuthenticatedRequest(endpoint, {
-    method: 'PUT',
-    headers: data ? { 'Content-Type': 'application/json' } : {},
+    method: "PUT",
+    headers: data ? { "Content-Type": "application/json" } : {},
     body: data ? JSON.stringify(data) : undefined,
   });
 
@@ -118,7 +125,7 @@ export async function apiPut(endpoint: string, data?: any): Promise<any> {
 // Generic authenticated DELETE request
 export async function apiDelete(endpoint: string): Promise<any> {
   const response = await makeAuthenticatedRequest(endpoint, {
-    method: 'DELETE',
+    method: "DELETE",
   });
 
   // Handle empty responses

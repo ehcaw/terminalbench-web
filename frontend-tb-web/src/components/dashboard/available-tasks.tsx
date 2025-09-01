@@ -25,7 +25,12 @@ export function AvailableTasks() {
   const [tasks, setTasks] = useState<AvailableTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const { user } = useAuth();
+  const { user, getIdToken } = useAuth();
+
+  const apiUrl =
+    process.env.NODE_ENV == "development"
+      ? "http://localhost:8000"
+      : "https://tb-web-backend.wache.dev";
 
   useEffect(() => {
     if (user?.uid) {
@@ -59,19 +64,24 @@ export function AvailableTasks() {
     }
   };
 
-  const handleStartTask = async (taskId: string) => {
+  const handleStartTask = async (taskName: string) => {
     if (!user?.uid) {
       setError("User not authenticated");
       return;
     }
 
+    const token = await getIdToken();
     try {
-      const response = await fetch("/api/tasks/start", {
+      const response = await fetch(`${apiUrl}/run-task-from-storage`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ taskId, userId: user.uid }),
+        body: JSON.stringify({
+          task_name: taskName,
+          storage_path: `tasks/${user.uid}/${taskName}.zip`,
+        }),
       });
 
       if (!response.ok) {
@@ -155,7 +165,7 @@ export function AvailableTasks() {
                 </TableCell>
                 <TableCell>{task.category || "General"}</TableCell>
                 <TableCell>
-                  <Button size="sm" onClick={() => handleStartTask(task.id)}>
+                  <Button size="sm" onClick={() => handleStartTask(task.name)}>
                     Start Task
                   </Button>
                 </TableCell>
