@@ -11,7 +11,7 @@ setup(
     author='Ryan Nguyen',
     author_email='ryannguyenc@gmail.com',
     description='A backend FastAPI server for running terminal-bench in the web',
-    long_description=open('README.md').read(),
+    long_description=open('../README.md').read(),
     long_description_content_type='text/markdown',
     url='https://github.com/',
     classifiers=[

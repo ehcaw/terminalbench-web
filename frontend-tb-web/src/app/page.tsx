@@ -1,7 +1,10 @@
 "use client";
 
 import { RunningTasks } from "@/components/dashboard/running-tasks";
+import { AvailableTasks } from "@/components/dashboard/available-tasks";
 import { UploadDialog } from "@/components/dashboard/upload-dialog";
+import { ModelSelectorDialog } from "@/components/model-selector-dialog";
+import { AIChatDemo } from "@/components/ai-chat-demo";
 import { useStore } from "@/lib/store";
 import Link from "next/link";
 
@@ -44,10 +47,13 @@ function Home() {
           <div className="flex-1">
             <h1 className="font-semibold text-lg">Tasks</h1>
           </div>
+          <ModelSelectorDialog />
           <UploadDialog />
           <UserNav />
         </header>
         <main className="flex flex-1 flex-col gap-4 p-4 md:gap-8 md:p-6">
+          <AIChatDemo />
+          <AvailableTasks />
           <RunningTasks tasks={runningTasks} />
         </main>
       </div>

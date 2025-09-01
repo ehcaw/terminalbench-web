@@ -1,0 +1,49 @@
+# To build the entire stack run 'make run'
+services:
+  terminal-bench-fastapi:
+    container_name: terminal-bench-fastapi
+    restart: unless-stopped
+    build:
+      context: ./src/fastapi
+      dockerfile: ./Dockerfile
+    ports:
+      - 8000:8000
+    volumes:
+      - ${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock
+      - task_files:/task_shared
+    environment:
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - FIREBASE_ADMIN_PROJECT_ID=${FIREBASE_ADMIN_PROJECT_ID}
+      - FIREBASE_ADMIN_PRIVATE_KEY=${FIREBASE_ADMIN_PRIVATE_KEY}
+      - FIREBASE_ADMIN_CLIENT_EMAIL=${FIREBASE_ADMIN_CLIENT_EMAIL}
+      - FIREBASE_STORAGE_BUCKET=${FIREBASE_STORAGE_BUCKET}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5m
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  terminal-bench-caddy:
+    container_name: terminal-bench-caddy
+    restart: unless-stopped
+    build:
+      context: ./src/caddy
+      dockerfile: ./Dockerfile
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - ./data/caddy_data:/data
+      - ./data/caddy_config:/config
+    depends_on:
+      - terminal-bench-fastapi
+    environment:
+      PROXY_BACKEND: terminal-bench-fastapi
+      PROXY_PORT: 8000
+      DOMAIN: ${DOMAIN}
+
+volumes:
+  terminal-bench-caddy_data:
+  terminal-bench-caddy_config:
+  task_files:
